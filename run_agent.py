@@ -1,21 +1,30 @@
 import os
 import json
 import datetime
-import google.generativeai as genai
 import subprocess
+import sys
 
-# Configure Gemini
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+# --- Self-Installation Guard ---
+try:
+    import google.generativeai as genai
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "google-generativeai"])
+    import google.generativeai as genai
+
+# --- Configuration ---
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-1.5-pro')
 
+LOG_FILE = "agent.log"
+
 def log_event(event_type, content):
-    log_entry = {
-        "timestamp": datetime.datetime.now().isoformat(),
+    entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "type": event_type,
         "content": content
     }
-    with open("agent.log", "a") as f:
-        f.write(json.dumps(log_entry) + "\n")
+    with open(LOG_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 def run_bash(command):
     log_event("tool_use", {"tool": "bash", "command": command})
@@ -23,28 +32,52 @@ def run_bash(command):
     return f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 def read_file(path):
-    log_event("tool_use", {"tool": "read", "path": path})
-    with open(os.path.join("/testbed", path), 'r') as f:
-        return f.read()
+    log_event("tool_use", {"tool": "read_file", "path": path})
+    try:
+        with open(os.path.join("/testbed", path), 'r') as f:
+            return f.read()
+    except Exception as e:
+        return str(e)
 
 def write_file(path, content):
-    log_event("tool_use", {"tool": "write", "path": path})
-    with open(os.path.join("/testbed", path), 'w') as f:
+    log_event("tool_use", {"tool": "write_file", "path": path})
+    full_path = os.path.join("/testbed", path)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    with open(full_path, 'w') as f:
         f.write(content)
     return "File written successfully."
 
-# Simple Agent Loop
-prompt = """
-Task: Improve ISBN import logic by using local staged records.
-Repo: OpenLibrary
-Instructions: Use the provided tools to explore the code and apply the fix.
-"""
+# --- Main Agent Logic ---
+def main():
+    task_id = os.environ.get("TASK_ID", "unknown")
+    
+    # Define the core instruction for Gemini
+    instruction = f"""
+    You are an AI SWE-bench agent. Your task is to fix a bug in the OpenLibrary repository.
+    Task ID: {task_id}
+    
+    Target: Improve ISBN import logic by using local staged records.
+    Primary File: openlibrary/core/imports.py
+    
+    1. Read the code.
+    2. Propose a fix.
+    3. Write the fix to the file.
+    """
 
-log_event("request", prompt)
-# Note: In a full implementation, you'd use Gemini's Function Calling feature.
-# For this demo, we simulate a direct fix for the specific task ID.
-response = model.generate_content(f"{prompt}\n\nProvide the code for openlibrary/core/imports.py")
-log_event("response", response.text)
+    log_event("request", instruction)
+    
+    # Simple one-shot repair for the hackathon
+    # In a production agent, you would use loop-based tool calling
+    response = model.generate_content(instruction + "\n\nProvide the full content for openlibrary/core/imports.py")
+    
+    # Extract code from Markdown if necessary
+    code_content = response.text.replace("```python", "").replace("```", "").strip()
+    
+    log_event("response", response.text)
+    
+    # Apply the fix
+    status = write_file("openlibrary/core/imports.py", code_content)
+    print(f"Agent finished: {status}")
 
-# Execution of fix (Mocking logic for hackathon speed - apply actual logic here)
-write_file("openlibrary/core/imports.py", response.text)
+if __name__ == "__main__":
+    main()
