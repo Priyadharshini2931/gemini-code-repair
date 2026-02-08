@@ -1,43 +1,31 @@
 import os
 import json
-import datetime
+from datetime import datetime, UTC
 import subprocess
 import sys
 
-# --- Self-Installation Guard ---
+# --- SDK Import with fallback ---
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "google-generativeai"])
-    import google.generativeai as genai
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "google-genai"])
+    from google import genai
 
 # --- Configuration ---
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-pro')
+# The new SDK uses a Client object
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+MODEL_ID = "gemini-1.5-pro" 
 
 LOG_FILE = "agent.log"
 
 def log_event(event_type, content):
     entry = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(UTC).isoformat(),
         "type": event_type,
         "content": content
     }
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
-
-def run_bash(command):
-    log_event("tool_use", {"tool": "bash", "command": command})
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    return f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-
-def read_file(path):
-    log_event("tool_use", {"tool": "read_file", "path": path})
-    try:
-        with open(os.path.join("/testbed", path), 'r') as f:
-            return f.read()
-    except Exception as e:
-        return str(e)
 
 def write_file(path, content):
     log_event("tool_use", {"tool": "write_file", "path": path})
@@ -47,37 +35,42 @@ def write_file(path, content):
         f.write(content)
     return "File written successfully."
 
-# --- Main Agent Logic ---
 def main():
     task_id = os.environ.get("TASK_ID", "unknown")
     
-    # Define the core instruction for Gemini
     instruction = f"""
-    You are an AI SWE-bench agent. Your task is to fix a bug in the OpenLibrary repository.
-    Task ID: {task_id}
-    
-    Target: Improve ISBN import logic by using local staged records.
-    Primary File: openlibrary/core/imports.py
-    
-    1. Read the code.
-    2. Propose a fix.
-    3. Write the fix to the file.
+    You are an AI SWE-bench agent. Task ID: {task_id}
+    Target: Improve ISBN import logic by using local staged records in openlibrary/core/imports.py
+    Provide the full updated Python code for that file.
     """
 
     log_event("request", instruction)
     
-    # Simple one-shot repair for the hackathon
-    # In a production agent, you would use loop-based tool calling
-    response = model.generate_content(instruction + "\n\nProvide the full content for openlibrary/core/imports.py")
-    
-    # Extract code from Markdown if necessary
-    code_content = response.text.replace("```python", "").replace("```", "").strip()
-    
-    log_event("response", response.text)
-    
-    # Apply the fix
-    status = write_file("openlibrary/core/imports.py", code_content)
-    print(f"Agent finished: {status}")
+    try:
+        # New SDK syntax: client.models.generate_content
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=instruction
+        )
+        
+        # Clean markdown code blocks if the model included them
+        raw_text = response.text
+        code_content = raw_text
+        if "```python" in raw_text:
+            code_content = raw_text.split("```python")[1].split("```")[0].strip()
+        elif "```" in raw_text:
+            code_content = raw_text.split("```")[1].split("```")[0].strip()
+
+        log_event("response", raw_text)
+        
+        # Apply the fix to the testbed
+        status = write_file("openlibrary/core/imports.py", code_content)
+        print(f"Agent finished: {status}")
+
+    except Exception as e:
+        log_event("error", str(e))
+        print(f"Error during generation: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
