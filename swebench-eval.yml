@@ -1,36 +1,63 @@
-# This is a basic workflow to help you get started with Actions
-
-name: CI
-
-# Controls when the workflow will run
+name: SWE-bench Pro Evaluation
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Task ID to run'
+        required: true
+        default: 'internetarchive__openlibrary-c4eebe6677acc4629cb541a98d5e91311444f5d4'
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  evaluate:
     runs-on: ubuntu-latest
+    container:
+      image: manojva/openlibrary-python312:latest
+      options: --user root
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - name: Setup Environment
+        run: bash setup_repository.sh
+        env:
+          TASK_ID: ${{ github.event.inputs.task_id }}
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Pre-verification (Expect Failure)
+        id: pre_test
+        continue-on-error: true
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          cd /testbed
+          python -m pytest openlibrary/tests/core/test_imports.py::TestImportItem::test_find_staged_or_pending -xvs > /github/workspace/pre_verification.log 2>&1
+
+      - name: Run AI Agent (Gemini)
+        run: python run_agent.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TASK_ID: ${{ github.event.inputs.task_id }}
+
+      - name: Post-verification (Expect Success)
+        id: post_test
+        run: |
+          cd /testbed
+          python -m pytest openlibrary/tests/core/test_imports.py::TestImportItem::test_find_staged_or_pending -xvs > /github/workspace/post_verification.log 2>&1
+
+      - name: Extract Metrics
+        run: python extract_metrics.py
+
+      - name: Generate Patch
+        run: |
+          cd /testbed
+          git diff > /github/workspace/changes.patch
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-results
+          path: |
+            agent.log
+            result.json
+            pre_verification.log
+            post_verification.log
+            changes.patch
+            prompts.md
